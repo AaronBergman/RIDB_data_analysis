@@ -1,0 +1,842 @@
+---
+title: "Making RIDB data 7_1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+setwd("~/R") #setting working directory; comment out if not running on Aaron's laptop
+##loading packages
+library(tidyverse)
+library(matrixStats)
+library(dslabs)
+library(purrr)
+library(readxl)
+library(spatstat)
+library(data.table)
+library(lubridate)
+library(vtable)
+library(moments)
+library(scales)
+```
+
+```{r}
+#linking zip codes to counties to demographics and income data
+
+#Zipcode to county
+#source: Census 2010, first link here: https://www.census.gov/geographies/reference-files/2010/geo/relationship-files.html#par_textimage_674173622
+crosswalk=read_csv("zcta_county_rel_10.csv")
+cross_narrow=crosswalk%>%mutate(fips=as.numeric(paste(as.character(STATE),as.character(COUNTY),sep="")))
+cw=cross_narrow%>%select(c(1,2,9,17,25))
+
+#In order to remove zip codes corresponding to multiple counties, removing observations where less than 50% of zip code residents live in a county
+cw2=cross_narrow%>%filter(ZPOPPCT>50)
+
+#income data by county
+#Source: census, 2019
+#first link here: https://www.census.gov/data/datasets/2019/demo/saipe/2019-state-and-county.html
+inc=read_excel("est19all.xls")
+colnames(inc)=inc[3,]
+inc2=inc[4:nrow(inc),]
+inc3=inc2%>%select(c(1,2,3,8,23))%>%mutate(fips=as.numeric(paste(as.character(`State FIPS Code`),as.character(`County FIPS Code`),sep="")))
+
+#linking zip codes to income data
+cw_inc=cw2%>%left_join(inc3,by="fips")
+
+
+```
+
+
+```{r}
+#Adding demographics data
+dem=read_csv("cc-est2019-alldata.csv")
+dem2=dem%>%filter(AGEGRP==0 & YEAR==12) #filtering for all ages and most recent year (2019)
+dem3=dem2%>%mutate(fips=as.numeric(paste(as.character(STATE),as.character(COUNTY),sep="")),
+                   pct_white=100*(WA_MALE+WA_FEMALE)/TOT_POP,
+                  pct_black=100*(BA_MALE+BA_FEMALE)/TOT_POP,
+                  pct_native_not_islander=100*(IA_MALE+IA_FEMALE)/TOT_POP,
+                  pct_hispanic=100*(H_MALE+H_FEMALE)/TOT_POP)
+dem4=dem3%>%select(c(4,5,8,81,82,83,84,85))
+
+#linking zipcode-county and county-demographic info
+combined=cw_inc%>%left_join(dem4,by="fips")
+combined2=combined%>%select(-c(2,5,6,7))
+
+combined3=combined2%>%select(c(1,21,25:33)) #keeping only necessary variables
+```
+
+```{r}
+##Cleaning up data
+
+#making variable naes clearer
+colnames(combined3)=c("zcta5","county_fips","county_poverty_rate_pct","county_median_household_income","state_name","county_or_county_like_area_name","county_population","county_pct_white","county_pct_black","county_pct_native_not_islander","county_pct_hispanic")
+
+#rounding data to significant figures specified by Patrick
+combined4=combined3%>%mutate(county_poverty_rate_pct=round(as.numeric(county_poverty_rate_pct),1),
+                             county_pct_white=round(county_pct_white,3),
+                             county_pct_black=round(county_pct_black,3),
+                             county_pct_native_not_islander=signif(county_pct_native_not_islander,4),
+                             county_pct_hispanic=round(county_pct_hispanic,3))
+
+#removing word "county" from county_name
+combined5=combined4%>%mutate(county_or_county_like_area_name=str_replace(county_or_county_like_area_name," County",""))
+
+#making columns appropriately numeric. Note: This removes leading 0 from zcta5.
+combined6=combined5%>%mutate(zcta5=as.numeric(zcta5),
+                             county_median_household_income=as.numeric(county_median_household_income))
+
+#making data for histograms with all counties in the states
+hist_dem_data=combined6%>%filter(!is.na(state_name))
+
+#cleaning up environment
+remove(combined)
+remove(combined2)
+remove(combined3)
+remove(combined4)
+remove(combined5)
+remove(cross_narrow)
+remove(cw)
+remove(inc)
+remove(inc2)
+```
+
+```{r}
+##loading RIDB data. Note: takes several minutes
+dat19=fread("reservations2019.csv")
+dat20=fread("FY20 Historical Reservations Full.csv")
+dat21=fread("FY21 UpTo 20210602 Historical Reservations Full.csv")
+```
+
+```{r}
+#trimming ridb data. This takes several minutes.
+
+#removing variables
+narrow19=dat19%>%select(-c(codehierarchy,regioncode,usetype,productid,tax,usefee,tranfee,attrfee,discount,totalbeforetax,equipmentlength))
+
+narrow20=dat20%>%select(-c(codehierarchy,regioncode,usetype,productid,tax,usefee,tranfee,attrfee,discount,totalbeforetax,equipmentlength))
+
+narrow21=dat21%>%select(-c(codehierarchy,regioncode,usetype,productid,tax,usefee,tranfee,attrfee,discount,totalbeforetax,equipmentlength))
+
+#filtering for DOI: this is what I messed up the first time around
+#Also removing observations where customer is from Hawaii because there is a peculiarly large number of guests visiting Pearl Harbor *from* HI
+dat192=narrow19%>%filter(!(agency=="NARA"|agency=="USACE"|agency=="USFS"|agency==""|is.na(agency)|customerstate=="HI"))
+dat202=narrow20%>%filter(!(agency=="NARA"|agency=="USACE"|agency=="USFS"|agency==""|is.na(agency)|customerstate=="HI"))
+dat212=narrow21%>%filter(!(agency=="NARA"|agency=="USACE"|agency=="USFS"|agency==""|is.na(agency)|customerstate=="HI"))
+
+#cleaning
+dat192=dat192%>%mutate(parentlocationid=as.numeric(parentlocationid))
+dat202=dat202%>%mutate(facilityid=as.numeric(facilityid),
+                       parentlocationid=as.numeric(parentlocationid))
+dat212=dat212%>%mutate(facilityid=as.numeric(facilityid),
+                       parentlocationid=as.numeric(parentlocationid))
+     
+#removing files to clear up space
+remove(narrow19)
+remove(narrow20)
+remove(narrow21)
+
+#combining 2019, 2020, and 2021:
+full=bind_rows(dat192,dat202,dat212)
+```
+
+```{r}
+#cleaning up and writing files
+full=full%>%mutate(customerzip=as.numeric(customerzip))
+
+#writing csv of filtered, cleaned data:
+fwrite(full,"full_7_14.csv")
+
+#joining to demographic and income data by customer zip code
+full_demo=full%>%left_join(combined6,by=c("customerzip"="zcta5"))
+
+full_demo=full_demo%>%rename(customer_county_fips=county_fips,
+                             customer_county_poverty_rate_pct=county_poverty_rate_pct,
+                             customer_county_median_household_income=county_median_household_income,
+                             customer_county_or_county_like_area_name=county_or_county_like_area_name,
+                             customer_county_population=county_population,
+                             customer_county_pct_white=county_pct_white,
+                             customer_county_pct_black=county_pct_black,
+                             customer_county_pct_native_not_islander=county_pct_native_not_islander,
+                             customer_county_pct_hispanic=county_pct_hispanic)
+
+full_demo=full_demo%>%mutate(numberofpeople=replace_na(numberofpeople,1))
+
+#writing demographics and complete files
+fwrite(full_demo,"full_demo_7_16.csv")
+
+write_csv(combined6,"zip_county_income_and_demographics_7_14.csv")
+```
+
+```{r}
+#aggregating data by county
+visitors_by_county=full_demo%>%group_by(customer_county_fips)%>%summarise(number_of_reservations=n(),total_registered_guests=sum(numberofpeople,na.rm=T),total_spent=sum(totalpaid))
+
+#linking to income/demographics data
+#also removing one row corresponding to "NA" county customers becuase it misleadingly changes summary statistics and is not linked to demographic or income data.
+visitors_by_county_linked=visitors_by_county%>%filter(!is.na(customer_county_fips))%>%left_join(combined6,by=c("customer_county_fips"="county_fips"))%>%.[!duplicated(.$customer_county_fips),]
+
+write_csv(visitors_by_county_linked,"visitors_by_county_linked_7_14.csv")
+```
+
+```{r}
+#Finding summary stats for amount spent by county
+spending=full_demo%>%group_by(customer_county_fips)%>%summarise(totalspent=sum(totalpaid))%>%filter(!is.na(customer_county_fips))
+
+write_csv(spending,"spending_7_14.csv")
+
+#making per capita and per-reservation data
+
+percapita=visitors_by_county_linked%>%left_join(spending,by='customer_county_fips')
+
+percapita2=percapita%>%mutate(reservations_per_capita=number_of_reservations/county_population,
+                              guests_per_capita=total_registered_guests/county_population,
+                              spending_per_capita=totalspent/county_population,
+                              spending_per_reservation=totalspent/number_of_reservations,
+                              spending_per_guest=totalspent/total_registered_guests, guests_per_reservation=total_registered_guests/number_of_reservations)
+
+percapita3=percapita2%>%right_join(hist_dem_data[,2],by=c("customer_county_fips"="county_fips"))
+
+percapita4=percapita3%>%mutate(
+  number_of_reservations=replace_na(number_of_reservations,0),
+  total_registered_guests=replace_na(total_registered_guests,0),
+  total_spent=replace_na(total_spent,0),
+  reservations_per_capita=replace_na(reservations_per_capita,0),
+  guests_per_capita=replace_na(guests_per_capita),
+  spending_per_capita=replace_na(spending_per_capita,0))
+
+percapita5=percapita4%>%.[!duplicated(.$customer_county_fips),]
+
+length(unique(percapita3$customer_county_fips))
+```
+
+```{r}
+#Histograms
+
+#number of visitors by county
+percapita2%>%filter(number_of_reservations<=8000)%>% #removing outliers for visual clarity
+  ggplot(aes(number_of_reservations/1000))+ 
+  geom_histogram(fill="darkblue",binwidth=.25,boundary=0)+scale_x_continuous(labels=comma)+
+  theme_minimal()+
+  scale_x_continuous(labels=comma)+
+  labs(x="Thousands of reservations",
+       y="Number of counties")
+     #  title = "Number of counties by reservations made")+
+
+percapita2%>%filter(number_of_reservations<=1000)%>% #zooming in on bulk of data
+  ggplot(aes(number_of_reservations))+
+  geom_histogram(fill="darkblue",binwidth =25,boundary=0)+scale_x_continuous(labels=comma)+
+  theme_minimal()+
+  labs(x="Reservations",
+       y="Number of counties")
+
+#calculating statistics for annotating graphs. Adding 26 to include counties outside data with zero reservations
+(sum(percapita2$number_of_reservations<250)+26)/3142
+
+(sum(percapita2$number_of_reservations>2000))/3142
+
+(sum(percapita2$number_of_reservations>8000))/3142
+
+(sum(percapita2$number_of_reservations<25)+26)/3142
+
+median(percapita2$number_of_reservations)
+```
+
+```{r}
+#registered guests per capita
+percapita2%>%filter(guests_per_capita<=.8)%>%ggplot(aes(x=guests_per_capita))+
+ geom_histogram(fill="darkblue",boundary=0,binwidth = .025)+
+  theme_minimal()+
+  labs(x="Guests per capita",
+       y="Number of counties")+
+       #title="Number of counties by registered guests per capita")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+percapita2%>%filter(guests_per_capita<=.1)%>%ggplot(aes(x=guests_per_capita))+
+ geom_histogram(fill="darkblue",boundary=0,binwidth = .005)+
+  scale_x_continuous()+
+  theme_minimal()+
+  labs(x="Guests per capita",
+       y="Number of counties")+
+       #title="Number of counties by registered guests per capita")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#statistics to label graph
+sum(percapita2$guests_per_capita<.1)/3142
+
+(sum(percapita2$number_of_reservations<500)+26)/3142
+
+```
+
+```{r}
+#registered guests per reservation
+
+percapita2%>%filter(guests_per_reservation<10)%>%
+  ggplot(aes(x=guests_per_reservation))+
+ geom_histogram(fill="darkblue",boundary=0,binwidth=.25)+
+  scale_x_continuous()+
+  theme_minimal()+
+  labs(x="Guests per reservation",
+       y="Number of counties")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#statistics to label graph
+sum(percapita2$guests_per_reservation<3.25 & percapita2$guests_per_reservation>1.75)/3116
+median(percapita2$guests_per_reservation)
+```
+
+```{r}
+#Spending per capita
+percapita2%>%filter(spending_per_capita<1.7)%>% ggplot(aes(x=spending_per_capita))+ #removing outliers for clarity
+ geom_histogram(fill="darkblue",boundary=0,binwidth = .125/2)+
+  scale_x_continuous()+
+  theme_minimal()+
+  labs(x="Dollars spent per capita",
+       y="Number of counties")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#zoomed in graph
+percapita2%>%filter(spending_per_capita<.5)%>% ggplot(aes(x=spending_per_capita))+
+ geom_histogram(fill="darkblue",boundary=0,binwidth = .025)+
+  scale_x_continuous()+
+  theme_minimal()+
+  labs(x="Dollars spent per capita",
+       y="Number of counties")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#annotation statistics
+(sum(percapita2$spending_per_capita<.25)+26)/3142
+sum(percapita2$spending_per_capita>.5)/3142
+sum(percapita2$spending_per_capita>4)/3142
+(sum(percapita2$spending_per_capita<.1)+26)/3142
+median(percapita2$spending_per_capita)
+```
+
+
+```{r}
+#Spending per reservation
+percapita2%>%ggplot(aes(x=spending_per_reservation))+
+ geom_histogram(fill="darkblue",boundary=0,binwidth=5)+
+  scale_x_continuous()+
+  theme_minimal()+
+  labs(x="Dollars spent per reservation",
+       y="Number of counties")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#annotation statistics
+sum(percapita2$spending_per_reservation<10)/3116
+sum(percapita2$spending_per_reservation>15 & percapita2$spending_per_reservation<35)/3116
+sum(percapita2$spending_per_reservation>60)/3116
+
+
+```
+
+```{r}
+#Spending per guest
+percapita2%>%filter(spending_per_guest<75)%>% #removing outliers for visual clarity
+  ggplot(aes(x=spending_per_guest))+
+ geom_histogram(boundary=0,fill="darkblue",binwidth=2.5)+
+  scale_x_continuous()+
+  theme_minimal()+
+  labs(x="Dollars spent per registered guest",
+       y="Number of counties")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#annotation statistics
+sum(percapita2$spending_per_guest<15 & percapita2$spending_per_guest>7.5,na.rm = T)/3116
+sum(percapita2$spending_per_guest<5,na.rm = T)/3116
+sum(percapita2$spending_per_guest>20,na.rm = T)/3116
+```
+
+```{r}
+#county household income
+max_income=max(percapita5$county_median_household_income,na.rm=T)/1000
+percapita5%>%ggplot(aes(x=county_median_household_income/1000))+
+  geom_histogram(boundary=0,fill="darkblue",bins =5)+
+  geom_vline(aes(xintercept=68.703),color="darkgray")+#source for median income: https://www.census.gov/library/publications/2020/demo/p60-270.html 
+  scale_x_continuous(breaks=c(0,.2*max_income,.4*max_income,.6*max_income,.8*max_income,max_income),labels=c("0","30.4","60.7","91.1","121.4","151.8"))+
+  scale_y_continuous(labels=comma)+
+  theme_minimal()+
+  labs(x="County median household income, thousands of dollars",
+       y="Number of counties",
+       title="Counties by median household income")+
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r}
+#poverty rate
+min_pov=min(percapita5$county_poverty_rate_pct,na.rm=T) #lowest poverty rate to help make bins
+pov_range=max(percapita5$county_poverty_rate_pct,na.rm=T)-min(percapita5$county_poverty_rate_pct,na.rm=T) #range of poverty rate to help make bins
+
+percapita5%>%ggplot(aes(x=county_poverty_rate_pct))+
+  geom_histogram(boundary=2.7,fill="darkblue",bins =6)+
+  scale_x_continuous(breaks=c(min_pov,min_pov+.2*pov_range,min_pov+.4*pov_range,min_pov+.6*pov_range,min_pov+.8*pov_range,min_pov+pov_range))+
+  scale_y_continuous(labels=comma)+
+  theme_minimal()+
+  labs(x="County poverty rate, percent",
+       y="Number of counties",
+       title="Counties by poverty rate")+
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+#registered guests
+percapita2%>%filter(total_registered_guests<15000)%>% #removing outliers
+  ggplot(aes(x=total_registered_guests/1000,bindwidth=.5))+
+ geom_histogram(boundary=0,fill="darkblue")+
+  scale_x_continuous()+
+  theme_minimal()+
+  labs(x="Thousands of registered guests",
+       y="Number of counties")
+
+percapita2%>%filter(total_registered_guests<1000)%>%  #zooming in
+  ggplot(aes(x=total_registered_guests))+
+ geom_histogram(boundary=0,fill="darkblue",binwidth=25)+
+  scale_x_continuous()+
+  theme_minimal()+
+  labs(x="Registered guests",
+       y="Number of counties")
+
+#annotation statistics
+sum(percapita2$total_registered_guests<2500,26)/3142
+sum(percapita2$total_registered_guests>5000)/3142
+sum(percapita2$total_registered_guests<25,26)/3142
+
+#to find median, looking at observations 3142/2 and 3142/2+1, to incorporate 26 counties with 0 visitors not in data 
+```
+
+```{r}
+#population
+percapita2%>%filter(county_population<10^6)%>% #removing outliers
+  ggplot(aes(x=county_population/1000))+
+ geom_histogram(boundary=0,fill="darkblue",binwidth=25)+
+  scale_x_continuous()+
+  theme_minimal()+
+  labs(x="2019 population, thousands of people",
+       y="Number of counties")
+
+percapita2%>%filter(county_population<25000)%>%  #zooming in
+  ggplot(aes(x=county_population))+
+ geom_histogram(boundary=0,fill="darkblue",binwidth=1000)+
+  scale_x_continuous()+
+  theme_minimal()+
+  labs(x="2019 Population",
+       y="Number of counties")
+
+#annotation statistics
+sum(percapita2$county_population<100000)/3116
+sum(percapita2$county_population>.5*10^6)/3116
+sum(percapita2$county_population<10000)/3116
+summary(percapita2$county_population)
+```
+
+```{r}
+#percent Hispanic
+
+min_his=min(percapita5$county_pct_hispanic,na.rm=T) #minimum Hispanic % to help make bins
+his_range=max(percapita5$county_pct_hispanic,na.rm=T)-min(percapita5$county_pct_hispanic,na.rm=T) #Hispanic % range to help make bins
+
+percapita5%>%ggplot(aes(x=county_pct_hispanic))+
+  geom_histogram(boundary=min_his,fill="darkblue",bins =6)+
+  scale_x_continuous(breaks=c(min_his,min_his+.2*his_range,min_his+.4*his_range,min_his+.6*his_range,min_his+.8*his_range,min_his+his_range),labels = scales::number_format(accuracy=.1))+
+  scale_y_continuous(labels=comma)+
+  theme_minimal()+
+  labs(x="County percent Hispanic",
+       y="Number of counties",
+       title="Counties by percent Hispanic population")+
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+#percent White
+min_w=min(percapita5$county_pct_white,na.rm=T) #minimum White % to help make bins
+w_range=max(percapita5$county_pct_white,na.rm=T)-min(percapita5$county_pct_white,na.rm=T)#Hispanic % range to help make bins
+
+percapita5%>%ggplot(aes(x=county_pct_white))+
+  geom_histogram(boundary=min_w,fill="darkblue",bins =6)+
+  scale_x_continuous(breaks=c(min_w,min_w+.2*w_range,min_w+.4*w_range,min_w+.6*w_range,min_w+.8*w_range,min_w+w_range),labels = scales::number_format(accuracy=.1))+
+  scale_y_continuous(labels=comma)+
+  theme_minimal()+
+  labs(x="County percent White",
+       y="Number of counties",
+       title="Counties by percent White population")+
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+#percent Black (improved)
+
+min_b=min(percapita5$county_pct_black,na.rm=T) #minimum White % to help make bins
+b_range=max(percapita5$county_pct_black,na.rm=T)-min(percapita5$county_pct_black,na.rm=T) #Hispanic % range to help make bins
+
+percapita5%>%ggplot(aes(x=county_pct_black))+
+  geom_histogram(boundary=min_b,fill="darkblue",bins =6)+
+  scale_x_continuous(breaks=c(min_b,min_b+.2*b_range,min_b+.4*b_range,min_b+.6*b_range,min_b+.8*b_range,min_b+b_range),labels = scales::number_format(accuracy=.1))+
+  scale_y_continuous(labels=comma)+
+  theme_minimal()+
+  labs(x="County percent Black",
+       y="Number of counties",
+       title="Counties by percent Black population")+
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r}
+#making summary statistics for visitors_by_county_linked
+
+#writing summary statistic files
+st(visitors_by_county_linked[-1,c(2:4,6,7,10:14)],summ=c('notNA(x)','mean(x)','median(x)','sd(x)','min(x)','max(x)'),out="csv",file="RIDB_summary_stats3_7_16.csv")
+
+write_csv(data.frame(table(full_demo$agency)),"agency_table_7_1.csv")
+write_csv(data.frame(table(full_demo$sitetype)),"sitetype_table_7_1.csv")
+write_csv(data.frame(table(full_demo$parentlocation)),"parentlocation_table_7_1.csv")
+write_csv(data.frame(table(full_demo$facilitystate)),"facilitystate_table_7_1.csv")
+write_csv(data.frame(table(full_demo$customerstate)),"customerstate_table_7_1.csv")
+write_csv(data.frame(table(full_demo$customercountry)),"customercountry_table_7_1.csv")
+write_csv(data.frame(table(full_demo$regiondescription)),"regiondescription_table_7_1.csv")
+
+full_demo%>%group_by(customerstate)%>%summarise(reservations=n(),guests=sum(numberofpeople,na.rm=T))%>%write_csv("customerstate_tab2_7_16.csv")
+
+full_demo%>%group_by(facilitystate)%>%summarise(reservations=n(),guests=sum(numberofpeople,na.rm=T))%>%write_csv("facilitystate_tab2_7_16.csv")
+
+full_demo%>%group_by(agency)%>%summarise(reservations=n(),guests=sum(numberofpeople,na.rm=T))%>%write_csv("agency_tab2_7_16.csv")
+```
+
+```{r}
+#making more summary statistics tables
+st(full_demo[,-c(1:18,20:24)],summ=c('notNA(x)','mean(x)','median(x)','sd(x)','min(x)','max(x)'),out="csv",file="RIDB_summary_stats2_7_16.csv")
+
+full_demo%>%group_by(customerstate)%>%summarise(reservations=n(),guests=sum(numberofpeople,na.rm=T))%>%write_csv("customerstate_tab2_7_16.csv")
+
+full_demo%>%group_by(facilitystate)%>%summarise(reservations=n(),guests=sum(numberofpeople,na.rm=T))%>%write_csv("facilitystate_tab2_7_16.csv")
+```
+
+
+```{r}
+#binning counties and adding social vulnerability index
+svi=read_csv("SVI2018_US_COUNTY.csv") #loading soc vulnerability data
+
+svi2=svi%>%select(c(5,79,85,89,96,98))%>%mutate(fips=as.numeric(FIPS)) #removing most of variables and cleaning
+vbcl_svi=visitors_by_county_linked%>%left_join(svi2,by=c("customer_county_fips"="fips"))%>%rename(vulnerability_percentile=RPL_THEMES) #joining to county data
+
+write_csv(vbcl_svi,"visitors_by_county_linked_7_14.csv") #writing file
+
+#turning continuouis variables into bins
+vbcl_binned=vbcl_svi%>%mutate(poverty_category=case_when(
+    county_poverty_rate_pct<5 ~ "0<=x<5",
+    county_poverty_rate_pct>=5 & county_poverty_rate_pct<10 ~ "5<=x<10",
+    county_poverty_rate_pct>=10 & county_poverty_rate_pct<15 ~ "10<=x<15",
+    county_poverty_rate_pct>=15 & county_poverty_rate_pct<20 ~ "15<=x<20",
+    county_poverty_rate_pct>=20 & county_poverty_rate_pct<25 ~ "20<=x<25",
+    county_poverty_rate_pct>=25 & county_poverty_rate_pct<30 ~ "25<=x<30",
+    county_poverty_rate_pct>=30 & county_poverty_rate_pct<40 ~ "30<=x<40",
+    county_poverty_rate_pct>=40 & county_poverty_rate_pct<60 ~ "40<=x<60",
+    county_poverty_rate_pct>=60  ~ "60<=x",
+    T~"NA"
+    ),
+    white_category=case_when(
+    county_pct_white<5 ~ "0<=x<5",
+    county_pct_white>=5 & county_pct_white<10 ~ "5<=x<10",
+    county_pct_white>=10 & county_pct_white<15 ~ "10<=x<15",
+    county_pct_white>=15 & county_pct_white<20 ~ "15<=x<20",
+    county_pct_white>=20 & county_pct_white<30 ~ "20<=x<30",
+    county_pct_white>=30 & county_pct_white<40 ~ "30<=x<40",
+    county_pct_white>=40 & county_pct_white<60 ~ "40<=x<60",
+    county_pct_white>=60 & county_pct_white<80 ~ "60<=x<80",
+    county_pct_white>=80 & county_pct_white<=100 ~ "80<=x<=100",
+    T~"NA"
+    ),
+    black_category=case_when(
+    county_pct_black<5 ~ "0<=x<5",
+    county_pct_black>=5 & county_pct_black<10 ~ "5<=x<10",
+    county_pct_black>=10 & county_pct_black<15 ~ "10<=x<15",
+    county_pct_black>=15 & county_pct_black<20 ~ "15<=x<20",
+    county_pct_black>=20 & county_pct_black<30 ~ "20<=x<30",
+    county_pct_black>=30 & county_pct_black<40 ~ "30<=x<40",
+    county_pct_black>=40 & county_pct_black<60 ~ "40<=x<60",
+    county_pct_black>=60 & county_pct_black<80 ~ "60<=x<80",
+    county_pct_black>=80 & county_pct_black<=100 ~ "80<=x<=100",
+    T~"NA"
+    ),
+    native_category=case_when(
+    county_pct_native_not_islander<5 ~ "0<=x<5",
+    county_pct_native_not_islander>=5 & county_pct_native_not_islander<10 ~ "5<=x<10",
+    county_pct_native_not_islander>=10 & county_pct_native_not_islander<15 ~ "10<=x<15",
+    county_pct_native_not_islander>=15 & county_pct_native_not_islander<20 ~ "15<=x<20",
+    county_pct_native_not_islander>=20 & county_pct_native_not_islander<30 ~ "20<=x<30",
+    county_pct_native_not_islander>=30 & county_pct_native_not_islander<40 ~ "30<=x<40",
+    county_pct_native_not_islander>=40 & county_pct_native_not_islander<60 ~ "40<=x<60",
+    county_pct_native_not_islander>=60 & county_pct_native_not_islander<80 ~ "60<=x<80",
+    county_pct_native_not_islander>=80 & county_pct_native_not_islander<=100 ~ "80<=x<=100",
+    T~"NA"
+    ),
+    hispanic_category=case_when(
+    county_pct_hispanic<5 ~ "0<=x<5",
+    county_pct_hispanic>=5 & county_pct_hispanic<10 ~ "5<=x<10",
+    county_pct_hispanic>=10 & county_pct_hispanic<15 ~ "10<=x<15",
+    county_pct_hispanic>=15 & county_pct_hispanic<20 ~ "15<=x<20",
+    county_pct_hispanic>=20 & county_pct_hispanic<30 ~ "20<=x<30",
+    county_pct_hispanic>=30 & county_pct_hispanic<40 ~ "30<=x<40",
+    county_pct_hispanic>=40 & county_pct_hispanic<60 ~ "40<=x<60",
+    county_pct_hispanic>=60 & county_pct_hispanic<80 ~ "60<=x<80",
+    county_pct_hispanic>=80 & county_pct_hispanic<=100 ~ "80<=x<=100",
+    T~"NA"
+    ),
+  income_category=case_when(
+    county_median_household_income<30000 ~ "x<30000",
+    county_median_household_income>=30000 & county_median_household_income<35000  ~ "30000<=x<35000",
+    county_median_household_income>=35000 & county_median_household_income<40000  ~ "35000<=x<40000",
+    county_median_household_income>=40000 & county_median_household_income<50000  ~ "40000<=x<50000",
+    county_median_household_income>=50000 & county_median_household_income<60000  ~ "50000<=x<60000",
+    county_median_household_income>=60000 & county_median_household_income<70000  ~ "60000<=x<70000",
+    county_median_household_income>=70000 & county_median_household_income<80000  ~ "70000<=x<80000",
+    county_median_household_income>=80000 & county_median_household_income<100000  ~ "80000<=x<100000",
+    county_median_household_income>=100000   ~ "100000<=x",
+    T~"NA"),
+  population_category=case_when(
+    county_population<=1000 ~ "x<=1000",
+    county_population>=1000 & county_population<5000 ~ "1000<=x<5000",
+    county_population>5000 & county_population<10000 ~ "5000<=x<10000",
+    county_population>10000 & county_population<50000 ~ "10000<=x<50000",
+    county_population>50000 & county_population<100000 ~ "50000<=x<100000",
+    county_population>100000 & county_population<500000 ~ "100000<=x<500000",
+    county_population>500000 & county_population<1000000 ~ "500000<=x<1m",
+    county_population>1000000 & county_population<5000000 ~ "1m<=x<5m",
+    county_population>5000000 & county_population<10000000 ~ "5m<=x<10m",
+    county_population>10000000 ~ "x>=10m",
+    T~"NA"),
+  vulnerabiltiy_percentile_category=case_when(
+    vulnerability_percentile<.1 & vulnerability_percentile>=0 ~ "0<=x<10" ,
+    vulnerability_percentile>=.1 & vulnerability_percentile<.2 ~ "10<=x<20",
+    vulnerability_percentile>=.2 & vulnerability_percentile<.3 ~ "20<=x<30",
+    vulnerability_percentile>=.3 & vulnerability_percentile<.4 ~ "30<=x<40",
+    vulnerability_percentile>=.4 & vulnerability_percentile<.5 ~ "40<=x<50",
+    vulnerability_percentile>=.5 & vulnerability_percentile<.6 ~ "50<=x<60",
+    vulnerability_percentile>=.6 & vulnerability_percentile<.7 ~ "60<=x<70",
+    vulnerability_percentile>=.7 & vulnerability_percentile<.8 ~ "70<=x<80",
+    vulnerability_percentile>=.8 & vulnerability_percentile<.9 ~ "80<=x<90",
+    vulnerability_percentile>=.9 ~ "x>=90",
+    T~"NA"),
+  
+  RPL_THEME1_category=case_when(
+    RPL_THEME1<.1 & RPL_THEME1>=0 ~ "0<=x<10" ,
+    RPL_THEME1>=.1 & RPL_THEME1<.2 ~ "10<=x<20",
+    RPL_THEME1>=.2 & RPL_THEME1<.3 ~ "20<=x<30",
+    RPL_THEME1>=.3 & RPL_THEME1<.4 ~ "30<=x<40",
+    RPL_THEME1>=.4 & RPL_THEME1<.5 ~ "40<=x<50",
+    RPL_THEME1>=.5 & RPL_THEME1<.6 ~ "50<=x<60",
+    RPL_THEME1>=.6 & RPL_THEME1<.7 ~ "60<=x<70",
+    RPL_THEME1>=.7 & RPL_THEME1<.8 ~ "70<=x<80",
+    RPL_THEME1>=.8 & RPL_THEME1<.9 ~ "80<=x<90",
+    RPL_THEME1>=.9 ~ "x>=90",
+    T~"NA"),
+  
+  RPL_THEME3_category=case_when(
+    RPL_THEME3<.1 & RPL_THEME3>=0 ~ "0<=x<10" ,
+    RPL_THEME3>=.1 & RPL_THEME3<.2 ~ "10<=x<20",
+    RPL_THEME3>=.2 & RPL_THEME3<.3 ~ "20<=x<30",
+    RPL_THEME3>=.3 & RPL_THEME3<.4 ~ "30<=x<40",
+    RPL_THEME3>=.4 & RPL_THEME3<.5 ~ "40<=x<50",
+    RPL_THEME3>=.5 & RPL_THEME3<.6 ~ "50<=x<60",
+    RPL_THEME3>=.6 & RPL_THEME3<.7 ~ "60<=x<70",
+    RPL_THEME3>=.7 & RPL_THEME3<.8 ~ "70<=x<80",
+    RPL_THEME3>=.8 & RPL_THEME3<.9 ~ "80<=x<90",
+    RPL_THEME3>=.9 ~ "x>=90",
+    T~"NA"))
+  
+write_csv(vbcl_binned,"vbcl_binned_7_15.csv")
+```
+
+```{r}
+#making summary statistics for each demographic/racial category
+
+res_count=sum(vbcl_binned$number_of_reservations)
+guest_count=sum(vbcl_binned$total_registered_guests)
+pop_count=sum(vbcl_binned$county_population,na.rm=T)
+
+category_stats=data.frame()
+for (i in colnames(vbcl_binned[21:30])){
+sub_table=vbcl_binned%>%group_by(vbcl_binned[`i`])%>%
+  summarise(reservations=sum(number_of_reservations),
+            registered_guests=sum(total_registered_guests),
+            reservations_per_capita=sum(number_of_reservations)/sum(county_population),
+            guests_per_capita=sum(total_registered_guests)/sum(county_population),
+            percent_reservations=100*sum(number_of_reservations)/res_count%>%signif(digits=3),
+            percent_guests=100*sum(total_registered_guests/guest_count)%>%signif(digits=3),
+            num_counties=n(),
+            percent_US_pop=100*sum(county_population,na.rm = T)/pop_count%>%signif(digits=3))%>%
+  mutate(attribute=`i`)
+
+colnames(sub_table)=c("attribute","reservations","registered_guests","reservations_per_capita","guests_per_capita","percent_reservations","percent_guests","number_of_counties","percent_US_pop","variable")
+category_stats=category_stats%>%rbind(sub_table)
+}
+
+category_stats=category_stats%>%mutate(combined=paste(variable,": ",attribute))
+
+write_csv(category_stats,"category_stats_7_15.csv")
+
+#note: several tables in the report correspond to "category_stats_7_15.csv"
+```
+
+
+```{r}
+#finding correlation coefficients
+percap_svi=percapita5%>%left_join(select(vbcl_svi,c(1,16,18,20)),by="customer_county_fips")
+view(percap_svi)
+percap2=percap_svi%>%select(-c(20))%>%filter(!(is.na(number_of_reservations)|is.na(state_name)))
+mycor=cor(percap2[,c(2:4,6,7,10:23)])
+```
+
+```{r} 
+#At one point this was for making Hawaii-only data
+
+# #looking into Ben's comments 7/13
+# #view(sample_n(full_demo,10000))
+# #trimming ridb data. This takes several minutes.
+# 
+# #remaking data for HI
+# 
+# #removing variables
+# narrow19=dat19%>%select(-c(codehierarchy,regioncode,usetype,productid,tax,usefee,tranfee,attrfee,discount,totalbeforetax,equipmentdescription,equipmentlength))
+# 
+# narrow20=dat20%>%select(-c(codehierarchy,regioncode,usetype,productid,tax,usefee,tranfee,attrfee,discount,totalbeforetax,equipmentdescription,equipmentlength))
+# 
+# narrow21=dat21%>%select(-c(codehierarchy,regioncode,usetype,productid,tax,usefee,tranfee,attrfee,discount,totalbeforetax,equipmentdescription,equipmentlength))
+# 
+# #filtering for DOI: this is what I messed up the first time around
+# dat19HI=narrow19%>%filter(!(agency=="NARA"|agency=="USACE"|agency=="USFS"|agency==""|is.na(agency)) & customerstate=="HI")
+# dat20HI=narrow20%>%filter(!(agency=="NARA"|agency=="USACE"|agency=="USFS"|agency==""|is.na(agency))& customerstate=="HI")
+# dat21HI=narrow21%>%filter(!(agency=="NARA"|agency=="USACE"|agency=="USFS"|agency==""|is.na(agency))& customerstate=="HI")
+# 
+# #cleaning
+# dat19HI=dat19HI%>%mutate(parentlocationid=as.numeric(parentlocationid))
+# dat20HI=dat20HI%>%mutate(facilityid=as.numeric(facilityid),
+#                        parentlocationid=as.numeric(parentlocationid))
+# dat21HI=dat21HI%>%mutate(facilityid=as.numeric(facilityid),
+#                        parentlocationid=as.numeric(parentlocationid))
+#      
+# #removing files to clear up space
+# remove(dat19)
+# remove(dat20)
+# remove(dat21)
+# remove(narrow19)
+# remove(narrow20)
+# remove(narrow21)
+# 
+# #combining 2019, 2020, and 2021:
+# full_HI=bind_rows(dat19HI,dat20HI,dat21HI)
+# 
+# view(sample_n(full_HI,1000))
+# 
+# HI_zips=full_HI%>%group_by(customerzip)%>%summarise(n=n())
+# HI_cust_destinations=full_HI%>%group_by(park)%>%summarise(n=n())%>%mutate(percent=100*n/sum(.$n))
+# 
+# pearl_harbor=full_demo%>%filter(park=="PEARL HARBOR HISTORIC SITES (USS Arizona)")
+# ph_origins=pearl_harbor%>%group_by(customerstate)%>%summarise(n=n(),percent=n()/nrow(.))
+```
+
+## Note: everything below is Aaron investigating data in response to comments in word document. Not necessary for analysis.
+```{r}
+#investigating lotteries
+only_lottery=full2%>%filter(str_detect(inventorytype,"LOTTERY"))
+unique(only_lottery$sitetype)
+view(sample_n(only_lottery,10000))
+```
+
+```{r}
+#more investigation
+view(sample_n(full_demo,10000))
+HI=full_demo%>%filter(customerstate=="HI")
+HI_visitor_destinations=HI%>%group_by(parentlocation)%>%summarise(n=n())%>%mutate(percent=100*n/sum(n))
+
+full_demo%>%filter(customer_county_poverty_rate_pct>45)%>%view
+
+full2=full_demo%>%mutate(calculated_nights=enddate-startdate)%>%mutate(calculated_nights=replace_na(calculated_nights,0))
+view(sample_n(full2,1000))
+
+median(full2$calculated_nights)
+
+mean(full2$calculated_nights)%>%seconds_to_period()
+
+plocations=full_demo%>%group_by(parentlocation)%>%summarise(n=n())%>%mutate(percent=100*n/nrow(full_demo))
+
+#sum(plocations$percent)
+
+top20=plocations%>%filter(n>62300)
+top10=plocations%>%filter(n>133000)
+view(top20)
+
+write_csv(top20,"top20.csv")
+view(plocations)
+
+nottop20=plocations%>%filter(!(n>62300))
+# sum(nottop20$n)
+# sum(nottop20$n)/nrow(full_demo)
+# sum(top20$percent)+27.533
+# sum(top20$n)+sum(nottop20$n)
+# sum(top20$n)+sum(nottop20$n)==nrow(full_demo)
+
+#looking into Yellowstone
+view(plocations)
+plocations%>%filter(str_detect(parentlocation,"Yellowstone"))
+
+#making destination-type table
+dest_type=full_demo%>%group_by(parentlocation,sitetype)%>%summarise(n=n())%>%mutate(percent=100*n/nrow(full_demo))
+view(dest_type)
+
+dest_type20=dest_type%>%filter(parentlocation%in%top20$parentlocation)
+view(dest_type20)
+length(unique(dest_type20$parentlocation))
+
+dest_type10=dest_type%>%filter(parentlocation%in%top10$parentlocation)
+view(dest_type10)
+
+```
+
+```{r}
+#investigating lottery destinations
+nrow(only_lottery)
+nrow(only_lottery)/nrow(full_demo)
+lottery_dest=only_lottery%>%group_by(parentlocation)%>%summarise(n=n(),percent=100*n()/nrow(.))
+
+view(lottery_dest)
+
+sum(lottery_dest$n)/nrow(full_demo)
+sum(lottery_dest$n)
+
+lottery_types=only_lottery%>%group_by(inventorytype)%>%summarise(n=n(),percent=100*n()/nrow(.))
+
+lottery_breakdown=only_lottery%>%group_by(inventorytype,parentlocation)%>%summarise(n=n(),percent=100*n()/nrow(.))
+
+lottery_equipment=only_lottery%>%group_by(inventorytype)%>%summarise(n=n(),percent=100*n()/nrow(.))
+```
+
+```{r}
+#looking into number of res-assoc people
+
+sum(full_demo$numberofpeople,na.rm = T)
+full_demo$numberofpeople%>%replace_na(1)%>%sum()
+sum(is.na(full_demo$numberofpeople))
+colnames(full_demo)
+
+##looking into agency
+full_demo%>%group_by(agency)%>%summarise(reservations=n(),percent=100*n()/nrow(full_demo))
+
+full_demo%>%filter(customercountry=="USA")%>%group_by(parentlocation)%>%summarise(reservations=n(),percent=100*n()/nrow(full_demo))%>%write_csv("plocations.csv")
+```
+
+```{r}
+#looking into customerstate
+state_stats=full_demo%>%group_by(customerstate)%>%summarise(reservations=n(),guests=sum(numberofpeople))
+view(state_stats)
+
+dest_stats=full_demo%>%group_by(facilitystate)%>%summarise(reservations=n(),guests=sum(numberofpeople))
+view(dest_stats)
+```
+
+
